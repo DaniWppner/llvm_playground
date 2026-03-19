@@ -1,0 +1,9 @@
+services:
+  build_llvm_playground_pass:
+    build:
+      context: .
+      dockerfile: BuildPassContainer.dockerfile
+    volumes:
+      - ./src:/home/src
+    tty: true
+    stdin_open: true

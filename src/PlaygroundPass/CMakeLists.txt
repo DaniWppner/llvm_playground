@@ -1,0 +1,2 @@
+add_llvm_library(playground_pass MODULE PlaygroundPass.cpp)
+llvm_map_components_to_libnames(llvm_libs core irreader support)
