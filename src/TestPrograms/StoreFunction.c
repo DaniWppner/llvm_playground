@@ -40,7 +40,7 @@ struct FnDescHolder {
 };
 
 // Creates FnDescs for both functions, returns one and leaks the other.
-struct FnDesc *get_random_function_one_or_two(void) {
+struct FnDesc *get_random_function_one_or_two() {
     struct ArgOfFunctionOne *one = malloc(sizeof(*one));
     if (one) { one->a = 4; one->b = 8; }
 

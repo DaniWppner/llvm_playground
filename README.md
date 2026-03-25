@@ -30,5 +30,5 @@ This creates a pass plugin shared library `src/build/PlaygroundPass/playground_p
 
 ```bash
 cd src
-opt -load-pass-plugin=./build/PlaygroundPass/playground_pass.so -passes=playground-pass -S ./TestPrograms/StoreFunction.ll -o out.ll
+opt -load-pass-plugin=/home/src/build/PlaygroundPass/playground_pass.so -passes=playground-pass -S /home/src/TestPrograms/StoreFunction.ll -o out.ll
 ```
