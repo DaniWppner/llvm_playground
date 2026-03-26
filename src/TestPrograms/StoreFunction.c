@@ -2,6 +2,11 @@
 #include <stdlib.h>
 #include <time.h>
 
+// This is a program that dynamically assigns different functions to a function pointer,
+// which gets propagated through type agnostic pointers in structs.
+// It is meant for the purpose of playground analysis with LLVM.
+
+
 int globals[2] = {0, 0};
 
 struct ArgOfFunctionOne {
@@ -40,7 +45,7 @@ struct FnDescHolder {
 };
 
 // Creates FnDescs for both functions, returns one and leaks the other.
-struct FnDesc *get_random_function_one_or_two() {
+struct FnDesc *getRandomStructOneOrTwo() {
     struct ArgOfFunctionOne *one = malloc(sizeof(*one));
     if (one) { one->a = 4; one->b = 8; }
 
@@ -69,7 +74,7 @@ struct FnDescHolder *wrap_picked(struct FnDesc *picked) {
 }
 
 int main(void) {
-    struct FnDesc *picked = get_random_function_one_or_two();
+    struct FnDesc *picked = getRandomStructOneOrTwo();
     struct FnDescHolder *h = wrap_picked(picked);
     if (!h) return 1;
 

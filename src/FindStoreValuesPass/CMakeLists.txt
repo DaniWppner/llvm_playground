@@ -1,0 +1,2 @@
+add_llvm_library(find_store_values_pass MODULE FindStoreValuesPass.cpp)
+llvm_map_components_to_libnames(llvm_libs core irreader support)

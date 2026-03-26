@@ -20,3 +20,4 @@ list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(AddLLVM)
 
 add_subdirectory(PlaygroundPass)
+add_subdirectory(FindStoreValuesPass)
