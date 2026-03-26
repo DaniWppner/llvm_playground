@@ -6,7 +6,6 @@
 #include "llvm/Passes/PassPlugin.h"
 
 #include <vector>
-#include <variant>
 
 #define GREEN   "\033[32m"
 #define RED     "\033[31m"
@@ -14,14 +13,6 @@
 
 using namespace llvm;
 
-struct NestedNode {
-    // A node holds either a single int, OR a vector of other NestedNodes
-    std::variant<int, std::vector<NestedNode>> data;
-
-    // Constructors for ease of use
-    NestedNode(int val) : data(val) {}
-    NestedNode(std::vector<NestedNode> vec) : data(std::move(vec)) {}
-};
 
 typedef std::pair<bool,std::vector<std::vector<int>>> retType;
 
@@ -70,6 +61,37 @@ static retType HandleTypeRecursive(Type *Ty) {
         return RecursivelyHandleStructType(OriginalStruct);
 }
 
+static void ShowResults(retType res, Type *ty, Value *memAddress, DebugLoc loc, const char color[]){
+      if (res.first){
+            errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at: " << *memAddress <<"\n";
+            //errs() << "Number of offsets: " << res.second.size() << "\n";
+            //errs() << "Is there pointer: " << res.first << "\n";
+            errs() << GREEN ;
+            for (int i = 0; i < res.second.size(); i++){
+                errs() << "\tOffset to function pointer: ";
+                for (int j = 0; j < res.second[i].size(); j++){
+                    errs() << res.second[i][j] << " ";
+                }
+                errs() <<"\n";
+            }
+            errs() << RESET ;
+        }
+}
+
+/*Unused, for debugging purposes*/
+static void printTheOneIWant(StoreInst *SI) {
+    Value *StoredValue = SI->getValueOperand();
+    Value *StoredLocation = SI->getPointerOperand();
+    Type *StoredType = StoredValue->getType();
+    if (DebugLoc loc = SI->getDebugLoc()){
+      if (loc.getLine() == 58 ){
+            Value *strippedValue = StoredValue->stripPointerCastsAndAliases();
+            Type *strippedType = strippedValue->getType();
+            errs() << "[LINE " << loc.getLine() << "] Store of type: " << *StoredType << " at: " << *StoredLocation <<" of value: "<< *StoredValue <<"\n";
+            errs() << "[LINE " << loc.getLine() << "] Store of type: " << *strippedType << " at: " << *StoredLocation <<"\n";
+        }
+      }
+}
 
 static void PrintFunctionPointerStores(StoreInst *SI) {
     Value *StoredValue = SI->getValueOperand();
@@ -77,23 +99,14 @@ static void PrintFunctionPointerStores(StoreInst *SI) {
     Type *StoredType = StoredValue->getType();
     if (DebugLoc loc = SI->getDebugLoc()){
         retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
-        if (offsetsToFunctionPointers.first){
-            errs() << "[LINE " << loc.getLine() << "] Store of type: " << *StoredType << " at: " << *StoredLocation <<"\n";
-            //errs() << "Number of offsets: " << offsetsToFunctionPointers.second.size() << "\n";
-            //errs() << "Is there pointer: " << offsetsToFunctionPointers.first << "\n";
-            errs() << GREEN ;
-            for (int i = 0; i < offsetsToFunctionPointers.second.size(); i++){
-                errs() << "\tOffset to function pointer: ";
-                for (int j = 0; j < offsetsToFunctionPointers.second[i].size(); j++){
-                    errs() << offsetsToFunctionPointers.second[i][j] << " ";
-                }
-                errs() <<"\n";
-            }
-            errs() << RESET ;
-        }
+        ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, loc, GREEN);
+        Value *stripped = StoredValue->stripPointerCastsAndAliases();
+        
+        Type* strippedType = stripped->getType();
+        retType offsetsOfStripped = HandleTypeRecursive(strippedType);
+        ShowResults(offsetsOfStripped, strippedType, StoredLocation, loc, RED);
   }
 }
-
 
 PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM) {
     for (auto &F : M) {
