@@ -1,15 +1,24 @@
 #include "FindStoreValuesPass.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
 #include <vector>
 
-#define GREEN   "\033[32m"
-#define RED     "\033[31m"
-#define RESET   "\033[0m"
+
+static constexpr const char *RESET = "\033[0m";
+static constexpr const char *GREEN = "\033[32m";
+static constexpr const char *RED = "\033[31m";
+static constexpr const char *YELLOW = "\033[33m";
+static constexpr const char *BLUE = "\033[34m";
+static constexpr const char *MAGENTA = "\033[35m";
+static constexpr const char *CYAN = "\033[36m";
+static constexpr const char *WHITE = "\033[37m";
+static constexpr const char *GRAY = "\033[90m";
+static constexpr const char *COLORS[] = {GREEN, RED, YELLOW, BLUE, MAGENTA, CYAN, WHITE, GRAY};
 
 using namespace llvm;
 
@@ -61,12 +70,65 @@ static retType HandleTypeRecursive(Type *Ty) {
         return RecursivelyHandleStructType(OriginalStruct);
 }
 
-static void ShowResults(retType res, Type *ty, Value *memAddress, DebugLoc loc, const char color[]){
+
+static std::vector<const Value*> GetAllValuesThatWouldBeStripped(const Value *V) {
+    SmallPtrSet<const Value *, 8> Visited;
+    std::vector<const Value*> res;
+    bool ciclicalTypeDetected = false;
+    Visited.insert(V);
+    res.push_back(V);
+    while (!ciclicalTypeDetected) {
+
+      /*
+      There are four cases we are interested in
+        1. GEPOperator means the pointer can be used to access the same address as a different type
+        2. BitCast Instruction is by definition a type change without modifying the data
+        3. AddressSpaceCast Instruction moves the pointer to a different address space, and can redefine the pointer type
+        4. CallBase Instruction can be interpreted as the Value being of the function return type 
+      */      
+        if (const GEPOperator *GEP = dyn_cast<GEPOperator>(V)) {
+          if (!GEP->hasAllZeroIndices())
+             // In this case a different memory address is accessed
+             // so we cannot handle it as just a type cast
+             return res;
+          // retrieve the "base" pointer
+          V = GEP->getPointerOperand();
+        } else if (Operator::getOpcode(V) == Instruction::BitCast) {
+            // first operand is the original type
+            Value *NewV = cast<Operator>(V)->getOperand(0);
+            if (!NewV->getType()->isPointerTy()){
+              res.push_back(NewV);
+              return res;
+            }
+            V = NewV;
+        } else if (Operator::getOpcode(V) == Instruction::AddrSpaceCast){
+            // first operand is the original pointer type
+            V = cast<Operator>(V)->getOperand(0);
+        } else if (const CallBase *Call = dyn_cast<CallBase>(V)){ 
+            if (const Value *RV = Call->getReturnedArgOperand()){
+              V = RV;
+            } else {
+              return res;
+            }
+        } else {
+          // There are no other types we want to handle, this is the end.
+          return res;
+        }
+
+        assert(V->getType()->isPointerTy() && "Unexpected operand type!");
+        res.push_back(V);
+        ciclicalTypeDetected = !(Visited.insert(V).second);
+    }
+    return res;    
+}
+
+
+static void ShowResults(retType res, Type *ty, Value *memAddress, DebugLoc loc, const char *color){
       if (res.first){
             errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at: " << *memAddress <<"\n";
             //errs() << "Number of offsets: " << res.second.size() << "\n";
             //errs() << "Is there pointer: " << res.first << "\n";
-            errs() << GREEN ;
+            errs() << color ;
             for (int i = 0; i < res.second.size(); i++){
                 errs() << "\tOffset to function pointer: ";
                 for (int j = 0; j < res.second[i].size(); j++){
@@ -96,16 +158,16 @@ static void printTheOneIWant(StoreInst *SI) {
 static void PrintFunctionPointerStores(StoreInst *SI) {
     Value *StoredValue = SI->getValueOperand();
     Value *StoredLocation = SI->getPointerOperand();
-    Type *StoredType = StoredValue->getType();
     if (DebugLoc loc = SI->getDebugLoc()){
-        retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
-        ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, loc, GREEN);
-        Value *stripped = StoredValue->stripPointerCastsAndAliases();
-        
-        Type* strippedType = stripped->getType();
-        retType offsetsOfStripped = HandleTypeRecursive(strippedType);
-        ShowResults(offsetsOfStripped, strippedType, StoredLocation, loc, RED);
-  }
+        std::vector<const Value*> TypesOfStoredValue = GetAllValuesThatWouldBeStripped(StoredValue);
+
+        for (int i = 0; i < TypesOfStoredValue.size(); i++){
+            Type *StoredType = TypesOfStoredValue[i]->getType();
+            retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
+            const char *color = COLORS[i];
+            ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, loc, color);
+        }     
+   }
 }
 
 PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM) {
