@@ -1,7 +1,9 @@
 #include "FindStoreValuesPass.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -102,7 +104,7 @@ static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
                 Offsets this_offsets_j = this_types_offsets[j].second;
                 errs() << "Internal chain:\n";
                 showTypeAndOffsetChain(this_types_j, this_offsets_j);
-                this_types_j.insert(this_types_j.begin(), ElemType);
+                this_types_j.insert(this_types_j.begin(), OriginalStruct);
                 this_offsets_j.insert(this_offsets_j.begin(), i);
                 errs() << "Updated internal chain:\n";
                 showTypeAndOffsetChain(this_types_j, this_offsets_j);
@@ -215,20 +217,56 @@ static std::vector<Value *> GetAllValuesThatWouldBeStripped(Value *V)
     return res;
 }
 
+static Instruction *FindSafeInsertionPoint(Value *V)
+{
+    if (Instruction *Inst = dyn_cast<Instruction>(V))
+    {
+        // Special case: If V is a Phi node, we cannot insert immediately after it.
+        // We must insert after ALL Phi nodes in that basic block.
+        if (isa<PHINode>(Inst))
+        {
+            return Inst->getParent()->getFirstNonPHI();
+        }
+        // Normal instruction: insert right after it
+        return Inst->getNextNode();
+    }
+    else if (Argument *Arg = dyn_cast<Argument>(V))
+    {
+        // Arguments are available immediately. Insert at the start of the function.
+        return &*Arg->getParent()->getEntryBlock().getFirstInsertionPt();
+    }
+
+    // If it's a GlobalVariable or something else, it's safer to return nullptr
+    // and handle it as a floating instruction, or pass the specific function context.
+    return nullptr;
+}
+
 static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc);
 
 static Value *gFPUOC_Struct(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
-    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *V->getType() << " in gFPUOC_Struct" << RESET << "\n";
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *V->getType() << " in gFPUOC_Struct. Using chain:\n";
+    ShowTypesOffsets({std::make_pair(typeChain, offsetChain)});
+    errs() << RESET;
 
     V = V->stripPointerCastsAndAliases();
 
     int offset = offsetChain[0];
     Type *structType = typeChain[0];
 
-    Value *GEP = GetElementPtrInst::CreateInBounds(structType, V,
-                                                   {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
-                                                    ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)});
+    ArrayRef<Value *> arrayParam = {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
+                                    ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)};
+
+    IRBuilder<> Builder(FindSafeInsertionPoint(V));
+    Builder.SetCurrentDebugLocation(loc);
+
+    unsigned AddrSpace = V->getType()->getPointerAddressSpace();
+    PointerType *StructPtrTy = PointerType::get(structType, AddrSpace);
+    Value *Cast = Builder.CreatePointerCast(V, StructPtrTy);
+
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Will use Type: " << *structType << " and offset: " << offset << " in gFPUOC_Struct\n"
+           << RESET;
+    Value *GEP = Builder.CreateInBoundsGEP(structType, Cast, arrayParam);
 
     errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Accessed value: " << *V << " of type: " << *V->getType() << "using type: " << *structType << " with offset: " << offset << " and obtained GEP: " << *GEP << RESET << "\n";
 
