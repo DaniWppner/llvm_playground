@@ -58,13 +58,14 @@ static void ShowPointersWithOffsets(Offsets offsetChain, Types typeChain, Value 
 {
     if (FunctionPointer)
     {
-        errs() << "Function pointer value:" << *FunctionPointer << " at chain:\n";
+        errs() << "Function pointer value:" << *FunctionPointer << " of type: " << *FunctionPointer->getType() << " at chain:\n";
         showTypeAndOffsetChain(typeChain, offsetChain);
     }
     else
     {
-        errs() << "\t Failed to retrieve function pointer value from " << *storedValue << " at chain:\n";
+        errs() << RED << "[WARNING] Failed to retrieve function pointer value from " << *storedValue << " at chain:\n";
         showTypeAndOffsetChain(typeChain, offsetChain);
+        errs() << RESET;
     }
 }
 
@@ -306,9 +307,8 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, 
     ShowTypesOffsets({std::make_pair(typeChain, offsetChain)});
     errs() << RESET;
 
-    if (!(Ty->isPointerTy() || Ty->isStructTy()))
+    if (offsetChain.size() == 0)
     {
-        assert(offsetChain.size() == 0 && "Offset chain should be empty for non struct/pointer types");
         return V;
     }
     else if (Ty->isPointerTy())
@@ -499,7 +499,7 @@ PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM
         }
     }
 
-    return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
 }
 
 PassPluginLibraryInfo getFindStoreValuesPassPluginInfo()
