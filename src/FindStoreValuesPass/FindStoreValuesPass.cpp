@@ -150,9 +150,46 @@ static std::vector<Value *> GetAllValuesThatWouldBeStripped(Value *V)
     return res;
 }
 
+static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer);
+
+static Value *gFPUOC_Struct(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty)
+{
+    StructType *ST = dyn_cast<StructType>(Ty);
+    int offset = offsetChainToPointer[0];
+    Value *GEP = GetElementPtrInst::CreateInBounds(ST, V,
+                                                   {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
+                                                    ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)});
+    std::vector<int> remaining = std::vector<int>(offsetChainToPointer.begin() + 1, offsetChainToPointer.end());
+    errs() << YELLOW << "[INFO] Accessed index: " << offset << " from value: " << *V << " of type: " << *Ty << " and obtained GEP: " << *GEP << RESET << "\n";
+    return getFunctionPointerUsingOffsetChain(GEP, remaining);
+}
+
+static Value *gFPUOC_Pointer(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty)
+{
+    if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
+    {
+        Value *BasePtr = GEP->getPointerOperand();
+        errs() << YELLOW << "[INFO] Transformed value: " << *V << " of type: " << *Ty << " to GEP operator: " << *GEP << " and obtained base pointer: " << *BasePtr << RESET << "\n";
+        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChainToPointer);
+    }
+    else
+    {
+        // TODO: be able to handle this
+        errs() << RED << "[WARNING] Cannot handle non GEP operator on value: " << *V << " of pointer type: " << *Ty << ".\n\tRemaining offsets: ";
+        for (int offset : offsetChainToPointer)
+        {
+            errs() << offset << " ";
+        }
+        errs() << RESET << "\n";
+        return nullptr;
+    }
+}
+
 static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer)
 {
     Type *Ty = V->getType();
+    errs() << YELLOW << "[INFO] Received value: " << *V << " of type: " << *Ty << " in getFunctionPointerUsingOffsetChain" << RESET << "\n";
+
     if (!(Ty->isPointerTy() || Ty->isStructTy()))
     {
         assert(offsetChainToPointer.size() == 0 && "Offset chain should be empty for non struct/pointer types");
@@ -160,40 +197,25 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int
     }
     else if (Ty->isPointerTy())
     {
-        if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
-        {
-            Value *BasePtr = GEP->getPointerOperand();
-            return getFunctionPointerUsingOffsetChain(BasePtr, offsetChainToPointer);
-        }
-        else
-        {
-            // TODO: be able to handle this
-            errs() << RED << "[WARNING] Cannot handle non GEP operator on pointer type: " << *V << RESET << "\n";
-            return nullptr;
-        }
+        return gFPUOC_Pointer(V, offsetChainToPointer, Ty);
     }
     else if (Ty->isStructTy())
     {
-        StructType *ST = dyn_cast<StructType>(Ty);
-        int offset = offsetChainToPointer[0];
-        Value *GEP = GetElementPtrInst::CreateInBounds(ST, V,
-                                                       {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
-                                                        ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)});
-        std::vector<int> remaining = std::vector<int>(offsetChainToPointer.begin() + 1, offsetChainToPointer.end());
-        return getFunctionPointerUsingOffsetChain(GEP, remaining);
+        return gFPUOC_Struct(V, offsetChainToPointer, Ty);
     }
     else
     {
-        errs() << RED << "[WARNING] Unexpected type during function pointer analysis: " << *Ty << RESET << "\n";
+        errs() << YELLOW << "[WARNING] Unexpected type during function pointer analysis: " << *Ty << RESET << "\n";
         return nullptr;
     }
 }
 
 static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
 {
+
     if (res.first)
     {
-        errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at: " << *memAddress << "\n";
+        errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at address: " << *memAddress << "\n";
 
         errs() << color;
         for (int i = 0; i < res.second.size(); i++)
@@ -223,6 +245,24 @@ static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedV
         }
         errs() << RESET;
     }
+    else
+    {
+        errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "]" << RESET << " Store of value: " << *storedValue << " of type: " << *ty << " at address: " << *memAddress << " does not contain a function pointer.\n";
+    }
+}
+
+/*Unused for now*/
+static std::pair<bool, std::vector<retType>> offsetsToPointersForAllValues(std::vector<Value *> possibleStoredValues)
+{
+    bool any = false;
+    std::vector<retType> res = {};
+    for (int i = 0; i < possibleStoredValues.size(); i++)
+    {
+        Value *StoredValue = possibleStoredValues[i];
+        Type *StoredType = StoredValue->getType();
+        retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
+        any = any || offsetsToFunctionPointers.first;
+    }
 }
 
 /*Unused, for debugging purposes*/
@@ -249,11 +289,11 @@ static void PrintFunctionPointerStores(StoreInst *SI)
     Value *StoredLocation = SI->getPointerOperand();
     if (DebugLoc loc = SI->getDebugLoc())
     {
-        std::vector<Value *> possbileStoredValuesAtOrig = GetAllValuesThatWouldBeStripped(origValue);
+        std::vector<Value *> possibleStoredValues = GetAllValuesThatWouldBeStripped(origValue);
 
-        for (int i = 0; i < possbileStoredValuesAtOrig.size(); i++)
+        for (int i = 0; i < possibleStoredValues.size(); i++)
         {
-            Value *StoredValue = possbileStoredValuesAtOrig[i];
+            Value *StoredValue = possibleStoredValues[i];
             Type *StoredType = StoredValue->getType();
             retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
             const char *color = COLORS[i];
