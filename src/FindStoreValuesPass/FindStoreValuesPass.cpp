@@ -23,8 +23,6 @@ static constexpr const char *COLORS[] = {GREEN, RED, YELLOW, BLUE, MAGENTA, CYAN
 
 using namespace llvm;
 
-typedef std::pair<bool, std::vector<std::vector<int>>> retType;
-
 typedef std::vector<Type *> Types;
 typedef std::vector<int> Offsets;
 
@@ -32,7 +30,7 @@ typedef std::vector<
     std::pair<Types, Offsets>>
     vectorTypesOffsets;
 
-typedef std::pair<bool, vectorTypesOffsets> handleTypeRetType;
+typedef std::pair<bool, vectorTypesOffsets> retType;
 
 static void showTypeAndOffsetChain(Types typeChain, Offsets offsetChain)
 {
@@ -69,15 +67,15 @@ static void ShowPointersWithOffsets(Offsets offsetChain, Types typeChain, Value 
     }
 }
 
-static handleTypeRetType HandleTypeRecursive(Type *Ty);
+static retType HandleTypeRecursive(Type *Ty);
 
-static handleTypeRetType RecursivelyHandlePointerType(PointerType *Ty)
+static retType RecursivelyHandlePointerType(PointerType *Ty)
 {
     Type *OrigType = Ty->getPointerElementType();
     return HandleTypeRecursive(OrigType);
 }
 
-static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
+static retType RecursivelyHandleStructType(StructType *OriginalStruct)
 {
     unsigned numElements = OriginalStruct->getNumElements();
     bool any = false;
@@ -85,7 +83,7 @@ static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
     for (unsigned i = 0; i < numElements; i++)
     {
         Type *ElemType = OriginalStruct->getElementType(i);
-        handleTypeRetType res_Pos = HandleTypeRecursive(ElemType);
+        retType res_Pos = HandleTypeRecursive(ElemType);
         any = any || res_Pos.first;
         vectorTypesOffsets this_types_offsets = res_Pos.second;
         if (any)
@@ -125,7 +123,7 @@ Returns:
   - bool: whether the type can be stripped to a function pointer with some offsets
   - vector: pairs of struct types and offset chains used to access each function pointer.
 */
-static handleTypeRetType HandleTypeRecursive(Type *Ty)
+static retType HandleTypeRecursive(Type *Ty)
 {
     if (!(Ty->isPointerTy() || Ty->isStructTy()))
     {
@@ -138,8 +136,7 @@ static handleTypeRetType HandleTypeRecursive(Type *Ty)
         {
             result = false;
         }
-        vectorTypesOffsets vector_result = {};
-        return std::make_pair(result, vector_result);
+        return std::make_pair(result, vectorTypesOffsets{});
     }
     if (Ty->isPointerTy())
         return RecursivelyHandlePointerType(dyn_cast<PointerType>(Ty));
@@ -148,7 +145,8 @@ static handleTypeRetType HandleTypeRecursive(Type *Ty)
     else
     {
         // TODO: handle more types
-        errs() << "Unexpected type during function pointer analysis: " << *Ty << "\n";
+        errs() << RED << "[WARNING] Unexpected type during function pointer analysis: " << *Ty << RESET << "\n";
+        return std::make_pair(false, vectorTypesOffsets{});
     }
 }
 
@@ -276,28 +274,9 @@ static Value *gFPUOC_Struct(Value *V, Offsets offsetChain, Types typeChain, Debu
     return getFunctionPointerUsingOffsetChain(GEP, remaining_offsets, remaining_types, loc);
 }
 
-static Value *gFPUOC_Pointer_DEBUG(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
-{
-    return gFPUOC_Struct(V->stripPointerCastsAndAliases(), offsetChain, typeChain, loc);
-}
-
 static Value *gFPUOC_Pointer(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
-    Type *Ty = V->getType();
-    if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
-    {
-        Value *BasePtr = GEP->getPointerOperand();
-        errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Transformed value: " << *V << " of type: " << *Ty << " to GEP operator: " << *GEP << " and obtained base pointer: " << *BasePtr << RESET << "\n";
-        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChain, typeChain, loc);
-    }
-    else
-    {
-        // TODO: be able to handle this
-        errs() << RED << "[WARNING - LINE " << loc.getLine() << "] Cannot handle non GEP operator on value: " << *V << " of pointer type: " << *Ty << ".\n\tRemaining offsets: ";
-        ShowTypesOffsets({std::make_pair(typeChain, offsetChain)});
-        errs() << RESET;
-        return nullptr;
-    }
+    return gFPUOC_Struct(V->stripPointerCastsAndAliases(), offsetChain, typeChain, loc);
 }
 
 static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
@@ -313,7 +292,7 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, 
     }
     else if (Ty->isPointerTy())
     {
-        return gFPUOC_Pointer_DEBUG(V, offsetChain, typeChain, loc);
+        return gFPUOC_Pointer(V, offsetChain, typeChain, loc);
     }
     else if (Ty->isStructTy())
     {
@@ -326,35 +305,17 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, 
     }
 }
 
-/*
-This broke after changing the return type of HandleTypeRecursive.
-
-static std::pair<bool, std::vector<retType>> offsetsToPointersForAllValues(std::vector<Value *> possibleStoredValues)
+static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, DebugLoc loc)
 {
-    bool any = false;
-    std::vector<retType> res = {};
-    for (int i = 0; i < possibleStoredValues.size(); i++)
-    {
-        Type *StoredType = possibleStoredValues[i]->getType();
-        retType partial_res = HandleTypeRecursive(StoredType);
-        any = any || partial_res.first;
-        res.push_back(partial_res);
-    }
-    return std::make_pair(any, res);
-}
-*/
-
-static handleTypeRetType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, DebugLoc loc)
-{
-    handleTypeRetType negative_res = std::make_pair(false, vectorTypesOffsets{});
+    retType negative_res = std::make_pair(false, vectorTypesOffsets{});
     int any = 0;
-    std::vector<handleTypeRetType> res = {};
+    std::vector<retType> res = {};
     std::vector<int> positiveResultIdxs = {};
 
     for (int i = 0; i < possibleStoredValues.size(); i++)
     {
         Type *StoredType = possibleStoredValues[i]->getType();
-        handleTypeRetType partial_res = HandleTypeRecursive(StoredType);
+        retType partial_res = HandleTypeRecursive(StoredType);
 
         if (partial_res.first)
         {
@@ -392,56 +353,14 @@ static handleTypeRetType theOneOffsetToPointer(std::vector<Value *> possibleStor
     }
 }
 
-/*
-This broke after changing the function signature of ShowPointersWithOffsets.
-
-static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
-{
-    errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at address: " << *memAddress << "\n";
-
-    errs() << color;
-    for (int i = 0; i < res.second.size(); i++)
-    {
-        std::vector<std::vector<int>> offsetsToFunctionPointers = res.second;
-        for (int j = 0; j < offsetsToFunctionPointers[i].size(); j++)
-        {
-            Value *FunctionPointer = getFunctionPointerUsingOffsetChain(storedValue, offsetsToFunctionPointers[i], loc);
-            ShowPointersWithOffsets(offsetsToFunctionPointers[i], storedValue, FunctionPointer, loc);
-        }
-        errs() << "\n";
-    }
-    errs() << RESET;
-}
-*/
-
-/*Unused, for debugging purposes*/
-static void printTheOneIWant(StoreInst *SI)
-{
-    Value *StoredValue = SI->getValueOperand();
-    Value *StoredLocation = SI->getPointerOperand();
-    Type *StoredType = StoredValue->getType();
-    if (DebugLoc loc = SI->getDebugLoc())
-    {
-        if (loc.getLine() == 58)
-        {
-            Value *strippedValue = StoredValue->stripPointerCastsAndAliases();
-            Type *strippedType = strippedValue->getType();
-            errs() << "[LINE " << loc.getLine() << "] Store of type: " << *StoredType << " at: " << *StoredLocation << " of value: " << *StoredValue << "\n";
-            errs() << "[LINE " << loc.getLine() << "] Store of type: " << *strippedType << " at: " << *StoredLocation << "\n";
-        }
-    }
-}
-
-// This is Debug
-// wtf
-static void TheDebugOne(StoreInst *SI)
+static void PrintFunctionPointerStores(StoreInst *SI)
 {
     Value *origValue = SI->getValueOperand();
     Value *StoredLocation = SI->getPointerOperand();
     if (DebugLoc loc = SI->getDebugLoc())
     {
         std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
-        handleTypeRetType one_good = theOneOffsetToPointer(possible_stored_values, loc);
+        retType one_good = theOneOffsetToPointer(possible_stored_values, loc);
         if (one_good.first)
         {
             vectorTypesOffsets typesOffsets = one_good.second;
@@ -456,34 +375,6 @@ static void TheDebugOne(StoreInst *SI)
         }
     }
 }
-
-/*
-This broke after changing the return type of HandleTypeRecursive.
-
-static void PrintFunctionPointerStores(StoreInst *SI)
-{
-    Value *origValue = SI->getValueOperand();
-    Value *StoredLocation = SI->getPointerOperand();
-    if (DebugLoc loc = SI->getDebugLoc())
-    {
-        std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
-
-        std::pair<bool, std::vector<retType>> res_for_each = offsetsToPointersForAllValues(possible_stored_values);
-
-        if (res_for_each.first)
-        {
-            // Debug:
-            auto last_idx = res_for_each.second.size() - 1;
-            Value *StoredValue = possible_stored_values[last_idx];
-            Type *StoredType = StoredValue->getType();
-            retType offsetsToFunctionPointers = res_for_each.second[last_idx];
-            // What am I doing?
-            const char *color = COLORS[0];
-            ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, StoredValue, loc, color);
-        }
-    }
-}
-*/
 
 PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM)
 {
