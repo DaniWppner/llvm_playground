@@ -150,32 +150,38 @@ static std::vector<Value *> GetAllValuesThatWouldBeStripped(Value *V)
     return res;
 }
 
-static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer);
+static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer, DebugLoc loc);
 
-static Value *gFPUOC_Struct(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty)
+static Value *gFPUOC_Struct(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
 {
+    V = V->stripPointerCastsAndAliases();
     StructType *ST = dyn_cast<StructType>(Ty);
     int offset = offsetChainToPointer[0];
     Value *GEP = GetElementPtrInst::CreateInBounds(ST, V,
                                                    {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
                                                     ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)});
     std::vector<int> remaining = std::vector<int>(offsetChainToPointer.begin() + 1, offsetChainToPointer.end());
-    errs() << YELLOW << "[INFO] Accessed index: " << offset << " from value: " << *V << " of type: " << *Ty << " and obtained GEP: " << *GEP << RESET << "\n";
-    return getFunctionPointerUsingOffsetChain(GEP, remaining);
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Accessed index: " << offset << " from value: " << *V << " of type: " << *Ty << " and obtained GEP: " << *GEP << RESET << "\n";
+    return getFunctionPointerUsingOffsetChain(GEP, remaining, loc);
 }
 
-static Value *gFPUOC_Pointer(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty)
+static Value *gFPUOC_Pointer_DEBUG(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
+{
+    return getFunctionPointerUsingOffsetChain(V->stripPointerCastsAndAliases(), offsetChainToPointer, loc);
+}
+
+static Value *gFPUOC_Pointer(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
 {
     if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
     {
         Value *BasePtr = GEP->getPointerOperand();
-        errs() << YELLOW << "[INFO] Transformed value: " << *V << " of type: " << *Ty << " to GEP operator: " << *GEP << " and obtained base pointer: " << *BasePtr << RESET << "\n";
-        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChainToPointer);
+        errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Transformed value: " << *V << " of type: " << *Ty << " to GEP operator: " << *GEP << " and obtained base pointer: " << *BasePtr << RESET << "\n";
+        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChainToPointer, loc);
     }
     else
     {
         // TODO: be able to handle this
-        errs() << RED << "[WARNING] Cannot handle non GEP operator on value: " << *V << " of pointer type: " << *Ty << ".\n\tRemaining offsets: ";
+        errs() << RED << "[WARNING - LINE " << loc.getLine() << "] Cannot handle non GEP operator on value: " << *V << " of pointer type: " << *Ty << ".\n\tRemaining offsets: ";
         for (int offset : offsetChainToPointer)
         {
             errs() << offset << " ";
@@ -185,10 +191,10 @@ static Value *gFPUOC_Pointer(Value *V, const std::vector<int> &offsetChainToPoin
     }
 }
 
-static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer)
+static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer, DebugLoc loc)
 {
     Type *Ty = V->getType();
-    errs() << YELLOW << "[INFO] Received value: " << *V << " of type: " << *Ty << " in getFunctionPointerUsingOffsetChain" << RESET << "\n";
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *Ty << " in getFunctionPointerUsingOffsetChain" << RESET << "\n";
 
     if (!(Ty->isPointerTy() || Ty->isStructTy()))
     {
@@ -197,11 +203,11 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int
     }
     else if (Ty->isPointerTy())
     {
-        return gFPUOC_Pointer(V, offsetChainToPointer, Ty);
+        return gFPUOC_Pointer_DEBUG(V, offsetChainToPointer, Ty, loc);
     }
     else if (Ty->isStructTy())
     {
-        return gFPUOC_Struct(V, offsetChainToPointer, Ty);
+        return gFPUOC_Struct(V, offsetChainToPointer, Ty, loc);
     }
     else
     {
@@ -210,58 +216,104 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int
     }
 }
 
-static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
-{
-
-    if (res.first)
+static void ShowPointersWithOffsets(std::vector<int> offsets, Value *storedValue, Value *FunctionPointer, DebugLoc loc){
+    if (FunctionPointer)        
     {
-        errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at address: " << *memAddress << "\n";
-
-        errs() << color;
-        for (int i = 0; i < res.second.size(); i++)
+        errs() << "\tFunction pointer value:" << *FunctionPointer << " at offset:\n";
+        for (int k = 0; k < offsets.size(); k++)
         {
-            std::vector<std::vector<int>> offsetsToFunctionPointers = res.second;
-            for (int j = 0; j < offsetsToFunctionPointers[i].size(); j++)
-            {
-                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(storedValue, offsetsToFunctionPointers[i]);
-                if (FunctionPointer)
-                {
-                    errs() << "\tFunction pointer value:" << *FunctionPointer << " at offset:\n";
-                    for (int k = 0; k < offsetsToFunctionPointers[i].size(); k++)
-                    {
-                        errs() << "\t\t" << offsetsToFunctionPointers[i][k] << "\n";
-                    }
-                }
-                else
-                {
-                    errs() << "\t Failed to retrieve function pointer value from " << *storedValue << " at offset:\n";
-                    for (int k = 0; k < offsetsToFunctionPointers[i].size(); k++)
-                    {
-                        errs() << "\t\t" << offsetsToFunctionPointers[i][k] << "\n";
-                    }
-                }
-            }
-            errs() << "\n";
+            errs() << "\t\t" << offsets[k] << "\n";
         }
-        errs() << RESET;
     }
     else
     {
-        errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "]" << RESET << " Store of value: " << *storedValue << " of type: " << *ty << " at address: " << *memAddress << " does not contain a function pointer.\n";
-    }
+        errs() << "\t Failed to retrieve function pointer value from " << *storedValue << " at offset:\n";
+        for (int k = 0; k < offsets.size(); k++)
+        {
+            errs() << "\t\t" << offsets[k] << "\n";
+        }
+    }    
 }
 
-/*Unused for now*/
+static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
+{
+    errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at address: " << *memAddress << "\n";
+
+    errs() << color;
+    for (int i = 0; i < res.second.size(); i++)
+    {
+        std::vector<std::vector<int>> offsetsToFunctionPointers = res.second;
+        for (int j = 0; j < offsetsToFunctionPointers[i].size(); j++)
+        {
+            Value *FunctionPointer = getFunctionPointerUsingOffsetChain(storedValue, offsetsToFunctionPointers[i], loc);
+            ShowPointersWithOffsets(offsetsToFunctionPointers[i], storedValue, FunctionPointer, loc);
+        }
+        errs() << "\n";
+    }
+    errs() << RESET;
+}
+
 static std::pair<bool, std::vector<retType>> offsetsToPointersForAllValues(std::vector<Value *> possibleStoredValues)
 {
     bool any = false;
     std::vector<retType> res = {};
     for (int i = 0; i < possibleStoredValues.size(); i++)
     {
-        Value *StoredValue = possibleStoredValues[i];
-        Type *StoredType = StoredValue->getType();
-        retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
-        any = any || offsetsToFunctionPointers.first;
+        Type *StoredType = possibleStoredValues[i]->getType();
+        retType partial_res = HandleTypeRecursive(StoredType);
+        any = any || partial_res.first;
+        res.push_back(partial_res);
+    }
+    return std::make_pair(any, res);
+}
+
+static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, DebugLoc loc)
+{
+    retType negative_res = std::make_pair(false, std::vector<std::vector<int>>());
+    int any = 0;
+    std::vector<retType> res = {};
+    std::vector<int> positiveResultIdxs = {};
+    for (int i = 0; i < possibleStoredValues.size(); i++)
+    {
+        Type *StoredType = possibleStoredValues[i]->getType();
+        retType partial_res = HandleTypeRecursive(StoredType);
+        if (partial_res.first)
+        {
+            errs() << YELLOW << "[INFO - LLINE " << loc.getLine() << "] Value " << *possibleStoredValues[i] << " of type: " << *StoredType << " can be stripped to a function pointer with offsets:\n";
+            for (int j = 0; j < partial_res.second.size(); j++){
+                errs() << "\tOffset chain:\n";
+                for (int k = 0; k < partial_res.second[j].size(); k++)
+                {
+                    errs() << "\t\t" << partial_res.second[j][k] << "\n";
+                }
+            }
+            errs() << RESET;
+            any += 1;
+            positiveResultIdxs.push_back(i);
+        }
+        res.push_back(partial_res);
+    }
+    // Debug Info
+    if (any > 1){
+        errs() << RED << "[WARNING] Multiple possible stored leading to function pointers not supported. Possible values and offsets:\n";
+        for (int i = 0; i < possibleStoredValues.size(); i++){
+            errs() << "\tValue: " << *possibleStoredValues[i] << " with offsets:\n";
+            for (int j = 0; j < res[i].second.size(); j++){
+                errs() << "\t\t";
+                for (int k = 0; k < res[i].second[j].size(); k++){
+                    errs() << res[i].second[j][k] << " ";
+                }
+                errs() << "\n";
+            }
+        }
+        return negative_res;
+    // End Debug Info
+    }else if (any == 1){
+        // assume positiveResultIdxs.size() == 1.
+        return std::make_pair(true, res[positiveResultIdxs[0]].second);
+
+    }else{
+        return negative_res;
     }
 }
 
@@ -283,22 +335,49 @@ static void printTheOneIWant(StoreInst *SI)
     }
 }
 
+
+// This is Debug
+// wtf
+static void TheDebugOne(StoreInst *SI){
+    Value *origValue = SI->getValueOperand();
+    Value *StoredLocation = SI->getPointerOperand();
+    if (DebugLoc loc = SI->getDebugLoc())
+    {
+        std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
+        retType one_good = theOneOffsetToPointer(possible_stored_values, loc);
+        if (one_good.first){
+            Value *StoredValue = origValue->stripPointerCastsAndAliases();
+            Type *StoredType = StoredValue->getType();
+            for (int i = 0; i < one_good.second.size(); i++)
+            {
+                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(StoredValue, one_good.second[i], loc);
+                ShowPointersWithOffsets(one_good.second[i], StoredValue, FunctionPointer, loc);
+            }
+        }
+    }
+}
+
 static void PrintFunctionPointerStores(StoreInst *SI)
 {
     Value *origValue = SI->getValueOperand();
     Value *StoredLocation = SI->getPointerOperand();
     if (DebugLoc loc = SI->getDebugLoc())
     {
-        std::vector<Value *> possibleStoredValues = GetAllValuesThatWouldBeStripped(origValue);
+        std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
 
-        for (int i = 0; i < possibleStoredValues.size(); i++)
-        {
-            Value *StoredValue = possibleStoredValues[i];
-            Type *StoredType = StoredValue->getType();
-            retType offsetsToFunctionPointers = HandleTypeRecursive(StoredType);
-            const char *color = COLORS[i];
+        std::pair<bool, std::vector<retType>> res_for_each = offsetsToPointersForAllValues(possible_stored_values);
+        
+        if (res_for_each.first){
+            // Debug: 
+                auto last_idx = res_for_each.second.size()-1;
+                Value *StoredValue = possible_stored_values[last_idx];
+                Type *StoredType = StoredValue->getType();
+                retType offsetsToFunctionPointers = res_for_each.second[last_idx];
+            // What am I doing?
+            const char *color = COLORS[0];
             ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, StoredValue, loc, color);
         }
+        
     }
 }
 
@@ -311,7 +390,7 @@ PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM
             for (auto &I : BB)
             {
                 if (StoreInst *SI = dyn_cast<StoreInst>(&I))
-                    PrintFunctionPointerStores(SI);
+                    TheDebugOne(SI);
             }
         }
     }
