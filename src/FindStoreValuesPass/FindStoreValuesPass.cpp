@@ -23,42 +23,60 @@ using namespace llvm;
 
 typedef std::pair<bool, std::vector<std::vector<int>>> retType;
 
-static retType HandleTypeRecursive(Type *Ty);
+typedef std::vector<Type *> Types;
+typedef std::vector<int> Offsets;
 
-static retType RecursivelyHandlePointerType(PointerType *Ty)
+typedef std::vector<
+    std::pair<Types, Offsets>>
+    vectorTypesOffsets;
+
+typedef std::pair<bool, vectorTypesOffsets> handleTypeRetType;
+
+static handleTypeRetType HandleTypeRecursive(Type *Ty);
+
+static handleTypeRetType RecursivelyHandlePointerType(PointerType *Ty)
 {
     Type *OrigType = Ty->getPointerElementType();
     return HandleTypeRecursive(OrigType);
 }
 
-static retType RecursivelyHandleStructType(StructType *OriginalStruct)
+static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
 {
     unsigned numElements = OriginalStruct->getNumElements();
     bool any = false;
-    std::vector<std::vector<int>> all_offsets = {};
+    vectorTypesOffsets all_vector_res = {};
     for (unsigned i = 0; i < numElements; i++)
     {
         Type *ElemType = OriginalStruct->getElementType(i);
-        retType res_Pos = HandleTypeRecursive(ElemType);
+        handleTypeRetType res_Pos = HandleTypeRecursive(ElemType);
         any = any || res_Pos.first;
-        std::vector<std::vector<int>> this_offsets = res_Pos.second;
+        vectorTypesOffsets this_types_offsets = res_Pos.second;
         if (any)
         {
-            if (this_offsets.size() == 0)
+            if (this_types_offsets.size() == 0)
             {
-                this_offsets.push_back(std::vector<int>{});
+                this_types_offsets.push_back(
+                    std::make_pair(Types{}, Offsets{}));
             }
-            for (int j = 0; j < this_offsets.size(); j++)
+            for (int j = 0; j < this_types_offsets.size(); j++)
             {
-                this_offsets[j].insert(this_offsets[j].begin(), i);
+                Types this_types_j = this_types_offsets[j].first;
+                Offsets this_offsets_j = this_types_offsets[j].second;
+                this_types_j.insert(this_types_j.begin(), ElemType);
+                this_offsets_j.insert(this_offsets_j.begin(), i);
             }
-            all_offsets.insert(all_offsets.end(), this_offsets.begin(), this_offsets.end());
+            all_vector_res.insert(all_vector_res.end(), this_types_offsets.begin(), this_types_offsets.end());
         }
     }
-    return std::make_pair(any, all_offsets);
+    return std::make_pair(any, all_vector_res);
 }
 
-static retType HandleTypeRecursive(Type *Ty)
+/*
+Returns:
+  - bool: whether the type can be stripped to a function pointer with some offsets
+  - vector: pairs of struct types and offset chains used to access each function pointer.
+*/
+static handleTypeRetType HandleTypeRecursive(Type *Ty)
 {
     if (!(Ty->isPointerTy() || Ty->isStructTy()))
     {
@@ -71,7 +89,8 @@ static retType HandleTypeRecursive(Type *Ty)
         {
             result = false;
         }
-        return std::make_pair(result, std::vector<std::vector<int>>{});
+        vectorTypesOffsets vector_result = {};
+        return std::make_pair(result, vector_result);
     }
     if (Ty->isPointerTy())
         return RecursivelyHandlePointerType(dyn_cast<PointerType>(Ty));
@@ -216,8 +235,9 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int
     }
 }
 
-static void ShowPointersWithOffsets(std::vector<int> offsets, Value *storedValue, Value *FunctionPointer, DebugLoc loc){
-    if (FunctionPointer)        
+static void ShowPointersWithOffsets(std::vector<int> offsets, Value *storedValue, Value *FunctionPointer, DebugLoc loc)
+{
+    if (FunctionPointer)
     {
         errs() << "\tFunction pointer value:" << *FunctionPointer << " at offset:\n";
         for (int k = 0; k < offsets.size(); k++)
@@ -232,7 +252,7 @@ static void ShowPointersWithOffsets(std::vector<int> offsets, Value *storedValue
         {
             errs() << "\t\t" << offsets[k] << "\n";
         }
-    }    
+    }
 }
 
 static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
@@ -253,6 +273,9 @@ static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedV
     errs() << RESET;
 }
 
+/*
+This broke after changing the return type of HandleTypeRecursive.
+
 static std::pair<bool, std::vector<retType>> offsetsToPointersForAllValues(std::vector<Value *> possibleStoredValues)
 {
     bool any = false;
@@ -266,6 +289,7 @@ static std::pair<bool, std::vector<retType>> offsetsToPointersForAllValues(std::
     }
     return std::make_pair(any, res);
 }
+*/
 
 static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, DebugLoc loc)
 {
@@ -280,7 +304,8 @@ static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, 
         if (partial_res.first)
         {
             errs() << YELLOW << "[INFO - LLINE " << loc.getLine() << "] Value " << *possibleStoredValues[i] << " of type: " << *StoredType << " can be stripped to a function pointer with offsets:\n";
-            for (int j = 0; j < partial_res.second.size(); j++){
+            for (int j = 0; j < partial_res.second.size(); j++)
+            {
                 errs() << "\tOffset chain:\n";
                 for (int k = 0; k < partial_res.second[j].size(); k++)
                 {
@@ -294,25 +319,32 @@ static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, 
         res.push_back(partial_res);
     }
     // Debug Info
-    if (any > 1){
+    if (any > 1)
+    {
         errs() << RED << "[WARNING] Multiple possible stored leading to function pointers not supported. Possible values and offsets:\n";
-        for (int i = 0; i < possibleStoredValues.size(); i++){
+        for (int i = 0; i < possibleStoredValues.size(); i++)
+        {
             errs() << "\tValue: " << *possibleStoredValues[i] << " with offsets:\n";
-            for (int j = 0; j < res[i].second.size(); j++){
+            for (int j = 0; j < res[i].second.size(); j++)
+            {
                 errs() << "\t\t";
-                for (int k = 0; k < res[i].second[j].size(); k++){
+                for (int k = 0; k < res[i].second[j].size(); k++)
+                {
                     errs() << res[i].second[j][k] << " ";
                 }
                 errs() << "\n";
             }
         }
         return negative_res;
-    // End Debug Info
-    }else if (any == 1){
+        // End Debug Info
+    }
+    else if (any == 1)
+    {
         // assume positiveResultIdxs.size() == 1.
         return std::make_pair(true, res[positiveResultIdxs[0]].second);
-
-    }else{
+    }
+    else
+    {
         return negative_res;
     }
 }
@@ -335,17 +367,18 @@ static void printTheOneIWant(StoreInst *SI)
     }
 }
 
-
 // This is Debug
 // wtf
-static void TheDebugOne(StoreInst *SI){
+static void TheDebugOne(StoreInst *SI)
+{
     Value *origValue = SI->getValueOperand();
     Value *StoredLocation = SI->getPointerOperand();
     if (DebugLoc loc = SI->getDebugLoc())
     {
         std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
         retType one_good = theOneOffsetToPointer(possible_stored_values, loc);
-        if (one_good.first){
+        if (one_good.first)
+        {
             Value *StoredValue = origValue->stripPointerCastsAndAliases();
             Type *StoredType = StoredValue->getType();
             for (int i = 0; i < one_good.second.size(); i++)
@@ -366,18 +399,18 @@ static void PrintFunctionPointerStores(StoreInst *SI)
         std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
 
         std::pair<bool, std::vector<retType>> res_for_each = offsetsToPointersForAllValues(possible_stored_values);
-        
-        if (res_for_each.first){
-            // Debug: 
-                auto last_idx = res_for_each.second.size()-1;
-                Value *StoredValue = possible_stored_values[last_idx];
-                Type *StoredType = StoredValue->getType();
-                retType offsetsToFunctionPointers = res_for_each.second[last_idx];
+
+        if (res_for_each.first)
+        {
+            // Debug:
+            auto last_idx = res_for_each.second.size() - 1;
+            Value *StoredValue = possible_stored_values[last_idx];
+            Type *StoredType = StoredValue->getType();
+            retType offsetsToFunctionPointers = res_for_each.second[last_idx];
             // What am I doing?
             const char *color = COLORS[0];
             ShowResults(offsetsToFunctionPointers, StoredType, StoredLocation, StoredValue, loc, color);
         }
-        
     }
 }
 
