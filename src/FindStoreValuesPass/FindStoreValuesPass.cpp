@@ -32,41 +32,39 @@ typedef std::vector<
 
 typedef std::pair<bool, vectorTypesOffsets> handleTypeRetType;
 
+static void showTypeAndOffsetChain(Types typeChain, Offsets offsetChain)
+{
+    errs() << "{\n";
+    for (int j = 0; j < typeChain.size(); j++)
+    {
+        errs() << std::string('\t', j) << "Type: " << *typeChain[j] << " Offset: " << offsetChain[j] << "\n";
+    }
+    errs() << "}\n";
+}
 
 static void ShowTypesOffsets(vectorTypesOffsets typesOffsets)
 {
+    errs() << "{\n";
     for (int i = 0; i < typesOffsets.size(); i++)
     {
-        Types this_types = typesOffsets[i].first;
-        Offsets this_offsets = typesOffsets[i].second;
-        for (int j = 0; j < this_types.size(); j++)
-        {
-            errs() << std::string('\t', j) << "Type: " << *this_types[j] << " Offset: " << this_offsets[j] << "\n";
-        }
-        
+        showTypeAndOffsetChain(typesOffsets[i].first, typesOffsets[i].second);
     }
+    errs() << "}\n";
 }
 
-static void ShowPointersWithOffsets(std::vector<int> offsets, Value *storedValue, Value *FunctionPointer, DebugLoc loc)
+static void ShowPointersWithOffsets(Offsets offsetChain, Types typeChain, Value *storedValue, Value *FunctionPointer)
 {
     if (FunctionPointer)
     {
-        errs() << "\tFunction pointer value:" << *FunctionPointer << " at offset:\n";
-        for (int k = 0; k < offsets.size(); k++)
-        {
-            errs() << "\t\t" << offsets[k] << "\n";
-        }
+        errs() << "Function pointer value:" << *FunctionPointer << " at chain:\n";
+        showTypeAndOffsetChain(typeChain, offsetChain);
     }
     else
     {
-        errs() << "\t Failed to retrieve function pointer value from " << *storedValue << " at offset:\n";
-        for (int k = 0; k < offsets.size(); k++)
-        {
-            errs() << "\t\t" << offsets[k] << "\n";
-        }
+        errs() << "\t Failed to retrieve function pointer value from " << *storedValue << " at chain:\n";
+        showTypeAndOffsetChain(typeChain, offsetChain);
     }
 }
-
 
 static handleTypeRetType HandleTypeRecursive(Type *Ty);
 
@@ -89,6 +87,10 @@ static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
         vectorTypesOffsets this_types_offsets = res_Pos.second;
         if (any)
         {
+            errs() << YELLOW;
+            errs() << "[INFO] Struct type: " << *OriginalStruct << " can reach function pointer through element " << i << " of type: " << *ElemType << "\n";
+            errs() << "Current chains (size=" << this_types_offsets.size() << "):\n";
+            ShowTypesOffsets(this_types_offsets);
             if (this_types_offsets.size() == 0)
             {
                 this_types_offsets.push_back(
@@ -98,10 +100,18 @@ static handleTypeRetType RecursivelyHandleStructType(StructType *OriginalStruct)
             {
                 Types this_types_j = this_types_offsets[j].first;
                 Offsets this_offsets_j = this_types_offsets[j].second;
+                errs() << "Internal chain:\n";
+                showTypeAndOffsetChain(this_types_j, this_offsets_j);
                 this_types_j.insert(this_types_j.begin(), ElemType);
                 this_offsets_j.insert(this_offsets_j.begin(), i);
+                errs() << "Updated internal chain:\n";
+                showTypeAndOffsetChain(this_types_j, this_offsets_j);
+                this_types_offsets[j] = std::make_pair(this_types_j, this_offsets_j);
             }
             all_vector_res.insert(all_vector_res.end(), this_types_offsets.begin(), this_types_offsets.end());
+            errs() << "Final chains (size=" << all_vector_res.size() << "):\n";
+            ShowTypesOffsets(all_vector_res);
+            errs() << RESET;
         }
     }
     return std::make_pair(any, all_vector_res);
@@ -205,64 +215,71 @@ static std::vector<Value *> GetAllValuesThatWouldBeStripped(Value *V)
     return res;
 }
 
-static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer, DebugLoc loc);
+static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc);
 
-static Value *gFPUOC_Struct(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
+static Value *gFPUOC_Struct(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *V->getType() << " in gFPUOC_Struct" << RESET << "\n";
+
     V = V->stripPointerCastsAndAliases();
-    StructType *ST = dyn_cast<StructType>(Ty);
-    int offset = offsetChainToPointer[0];
-    Value *GEP = GetElementPtrInst::CreateInBounds(ST, V,
+
+    int offset = offsetChain[0];
+    Type *structType = typeChain[0];
+
+    Value *GEP = GetElementPtrInst::CreateInBounds(structType, V,
                                                    {ConstantInt::get(Type::getInt32Ty(V->getContext()), 0),
                                                     ConstantInt::get(Type::getInt32Ty(V->getContext()), offset)});
-    std::vector<int> remaining = std::vector<int>(offsetChainToPointer.begin() + 1, offsetChainToPointer.end());
-    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Accessed index: " << offset << " from value: " << *V << " of type: " << *Ty << " and obtained GEP: " << *GEP << RESET << "\n";
-    return getFunctionPointerUsingOffsetChain(GEP, remaining, loc);
+
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Accessed value: " << *V << " of type: " << *V->getType() << "using type: " << *structType << " with offset: " << offset << " and obtained GEP: " << *GEP << RESET << "\n";
+
+    Offsets remaining_offsets = Offsets(offsetChain.begin() + 1, offsetChain.end());
+    Types remaining_types = Types(typeChain.begin() + 1, typeChain.end());
+    return getFunctionPointerUsingOffsetChain(GEP, remaining_offsets, remaining_types, loc);
 }
 
-static Value *gFPUOC_Pointer_DEBUG(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
+static Value *gFPUOC_Pointer_DEBUG(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
-    return getFunctionPointerUsingOffsetChain(V->stripPointerCastsAndAliases(), offsetChainToPointer, loc);
+    return gFPUOC_Struct(V->stripPointerCastsAndAliases(), offsetChain, typeChain, loc);
 }
 
-static Value *gFPUOC_Pointer(Value *V, const std::vector<int> &offsetChainToPointer, Type *Ty, DebugLoc loc)
+static Value *gFPUOC_Pointer(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
+    Type *Ty = V->getType();
     if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
     {
         Value *BasePtr = GEP->getPointerOperand();
         errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Transformed value: " << *V << " of type: " << *Ty << " to GEP operator: " << *GEP << " and obtained base pointer: " << *BasePtr << RESET << "\n";
-        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChainToPointer, loc);
+        return getFunctionPointerUsingOffsetChain(BasePtr, offsetChain, typeChain, loc);
     }
     else
     {
         // TODO: be able to handle this
         errs() << RED << "[WARNING - LINE " << loc.getLine() << "] Cannot handle non GEP operator on value: " << *V << " of pointer type: " << *Ty << ".\n\tRemaining offsets: ";
-        for (int offset : offsetChainToPointer)
-        {
-            errs() << offset << " ";
-        }
-        errs() << RESET << "\n";
+        ShowTypesOffsets({std::make_pair(typeChain, offsetChain)});
+        errs() << RESET;
         return nullptr;
     }
 }
 
-static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int> &offsetChainToPointer, DebugLoc loc)
+static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
     Type *Ty = V->getType();
-    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *Ty << " in getFunctionPointerUsingOffsetChain" << RESET << "\n";
+    errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Received value: " << *V << " of type: " << *Ty << " in getFunctionPointerUsingOffsetChain\n. Using chain:\n";
+    ShowTypesOffsets({std::make_pair(typeChain, offsetChain)});
+    errs() << RESET;
 
     if (!(Ty->isPointerTy() || Ty->isStructTy()))
     {
-        assert(offsetChainToPointer.size() == 0 && "Offset chain should be empty for non struct/pointer types");
+        assert(offsetChain.size() == 0 && "Offset chain should be empty for non struct/pointer types");
         return V;
     }
     else if (Ty->isPointerTy())
     {
-        return gFPUOC_Pointer_DEBUG(V, offsetChainToPointer, Ty, loc);
+        return gFPUOC_Pointer_DEBUG(V, offsetChain, typeChain, loc);
     }
     else if (Ty->isStructTy())
     {
-        return gFPUOC_Struct(V, offsetChainToPointer, Ty, loc);
+        return gFPUOC_Struct(V, offsetChain, typeChain, loc);
     }
     else
     {
@@ -270,7 +287,6 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, const std::vector<int
         return nullptr;
     }
 }
-
 
 /*
 This broke after changing the return type of HandleTypeRecursive.
@@ -306,7 +322,7 @@ static handleTypeRetType theOneOffsetToPointer(std::vector<Value *> possibleStor
         {
             vectorTypesOffsets partial_vector_res = partial_res.second;
 
-            errs() << YELLOW << "[INFO - LLINE " << loc.getLine() << "] Value " << *possibleStoredValues[i] << " of type: " << *StoredType << " can reach function pointer:\n";
+            errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Value " << *possibleStoredValues[i] << " of type: " << *StoredType << " can reach function pointer:\n";
             ShowTypesOffsets(partial_res.second);
             errs() << RESET;
 
@@ -338,6 +354,9 @@ static handleTypeRetType theOneOffsetToPointer(std::vector<Value *> possibleStor
     }
 }
 
+/*
+This broke after changing the function signature of ShowPointersWithOffsets.
+
 static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedValue, DebugLoc loc, const char *color)
 {
     errs() << color << "[LINE " << loc.getLine() << "]" << RESET << " Store of type: " << *ty << " at address: " << *memAddress << "\n";
@@ -355,6 +374,7 @@ static void ShowResults(retType res, Type *ty, Value *memAddress, Value *storedV
     }
     errs() << RESET;
 }
+*/
 
 /*Unused, for debugging purposes*/
 static void printTheOneIWant(StoreInst *SI)
@@ -383,19 +403,24 @@ static void TheDebugOne(StoreInst *SI)
     if (DebugLoc loc = SI->getDebugLoc())
     {
         std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
-        retType one_good = theOneOffsetToPointer(possible_stored_values, loc);
+        handleTypeRetType one_good = theOneOffsetToPointer(possible_stored_values, loc);
         if (one_good.first)
         {
+            vectorTypesOffsets typesOffsets = one_good.second;
             Value *StoredValue = origValue->stripPointerCastsAndAliases();
-            Type *StoredType = StoredValue->getType();
             for (int i = 0; i < one_good.second.size(); i++)
             {
-                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(StoredValue, one_good.second[i], loc);
-                ShowPointersWithOffsets(one_good.second[i], StoredValue, FunctionPointer, loc);
+                Types typeChain = typesOffsets[i].first;
+                Offsets offsetChain = typesOffsets[i].second;
+                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(StoredValue, offsetChain, typeChain, loc);
+                ShowPointersWithOffsets(offsetChain, typeChain, StoredValue, FunctionPointer);
             }
         }
     }
 }
+
+/*
+This broke after changing the return type of HandleTypeRecursive.
 
 static void PrintFunctionPointerStores(StoreInst *SI)
 {
@@ -420,6 +445,7 @@ static void PrintFunctionPointerStores(StoreInst *SI)
         }
     }
 }
+*/
 
 PreservedAnalyses FindStoreValuesPass::run(Module &M, ModuleAnalysisManager &MAM)
 {
