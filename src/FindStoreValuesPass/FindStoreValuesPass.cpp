@@ -286,7 +286,6 @@ static Value *gFPUOC_Struct(Value *V, Offsets offsetChain, Types typeChain, Debu
     return getFunctionPointerUsingOffsetChain(GEP, remaining_offsets, remaining_types, loc);
 }
 
-
 static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
     Type *Ty = V->getType();
@@ -306,7 +305,7 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, 
     }
 }
 
-static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, DebugLoc loc)
+static retType getOffsetChainUsingAllCastedValues(std::vector<Value *> possibleStoredValues, DebugLoc loc)
 {
     retType negative_res = std::make_pair(false, vectorTypesOffsets{});
     int any = 0;
@@ -320,8 +319,6 @@ static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, 
 
         if (partial_res.first)
         {
-            vectorTypesOffsets partial_vector_res = partial_res.second;
-
             errs() << YELLOW << "[INFO - LINE " << loc.getLine() << "] Value " << *possibleStoredValues[i] << " of type: " << *StoredType << " can reach function pointer:\n";
             ShowTypesOffsets(partial_res.second);
             errs() << RESET;
@@ -357,21 +354,19 @@ static retType theOneOffsetToPointer(std::vector<Value *> possibleStoredValues, 
 static void PrintFunctionPointerStores(StoreInst *SI)
 {
     Value *origValue = SI->getValueOperand();
-    Value *StoredLocation = SI->getPointerOperand();
     if (DebugLoc loc = SI->getDebugLoc())
     {
         std::vector<Value *> possible_stored_values = GetAllValuesThatWouldBeStripped(origValue);
-        retType one_good = theOneOffsetToPointer(possible_stored_values, loc);
+        retType one_good = getOffsetChainUsingAllCastedValues(possible_stored_values, loc);
         if (one_good.first)
         {
             vectorTypesOffsets typesOffsets = one_good.second;
-            Value *StoredValue = origValue->stripPointerCastsAndAliases();
             for (int i = 0; i < one_good.second.size(); i++)
             {
                 Types typeChain = typesOffsets[i].first;
                 Offsets offsetChain = typesOffsets[i].second;
-                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(StoredValue, offsetChain, typeChain, loc);
-                ShowPointersWithOffsets(offsetChain, typeChain, StoredValue, FunctionPointer, loc);
+                Value *FunctionPointer = getFunctionPointerUsingOffsetChain(origValue, offsetChain, typeChain, loc);
+                ShowPointersWithOffsets(offsetChain, typeChain, origValue, FunctionPointer, loc);
             }
         }
     }
