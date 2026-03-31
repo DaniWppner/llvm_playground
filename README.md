@@ -32,3 +32,5 @@ This creates a pass plugin shared library `src/build/PlaygroundPass/playground_p
 cd src
 opt -load-pass-plugin=/home/src/build/PlaygroundPass/playground_pass.so -passes=playground-pass -S /home/src/TestPrograms/StoreFunction.ll -o out.ll
 ```
+
+## If you want to use `DynamicStructs.c` or the pass `FindStoreValuesPass` follow similar instructions

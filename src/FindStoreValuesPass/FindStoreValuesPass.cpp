@@ -286,10 +286,6 @@ static Value *gFPUOC_Struct(Value *V, Offsets offsetChain, Types typeChain, Debu
     return getFunctionPointerUsingOffsetChain(GEP, remaining_offsets, remaining_types, loc);
 }
 
-static Value *gFPUOC_Pointer(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
-{
-    return gFPUOC_Struct(V->stripPointerCastsAndAliases(), offsetChain, typeChain, loc);
-}
 
 static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, Types typeChain, DebugLoc loc)
 {
@@ -304,18 +300,9 @@ static Value *getFunctionPointerUsingOffsetChain(Value *V, Offsets offsetChain, 
     {
         return V;
     }
-    else if (Ty->isPointerTy())
-    {
-        return gFPUOC_Pointer(V, offsetChain, typeChain, loc);
-    }
-    else if (Ty->isStructTy())
-    {
-        return gFPUOC_Struct(V, offsetChain, typeChain, loc);
-    }
     else
     {
-        errs() << RED << "[WARNING] Unexpected type during function pointer analysis: " << *Ty << RESET << "\n";
-        return nullptr;
+        return gFPUOC_Struct(V, offsetChain, typeChain, loc);
     }
 }
 
